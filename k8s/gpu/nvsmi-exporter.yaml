@@ -1,0 +1,69 @@
+# nvidia-smi exporter: one pod per GPU node, metrics on :9401, scraped by the
+# nvsmi-exporter ServiceMonitor. Reads the GPU through the nvidia runtime without taking
+# a time-slice (NVIDIA_VISIBLE_DEVICES=all, utility capability only).
+# The script comes from the lab-tools ConfigMap (tools/nvsmi_exporter.py).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvsmi-exporter
+  namespace: monitoring
+  labels:
+    app: nvsmi-exporter
+spec:
+  selector:
+    matchLabels:
+      app: nvsmi-exporter
+  template:
+    metadata:
+      labels:
+        app: nvsmi-exporter
+    spec:
+      runtimeClassName: nvidia
+      hostPID: true            # lets nvidia-smi name the processes that hold GPU memory
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: exporter
+          image: ${EXPORTER_IMAGE}
+          command: ["python3", "-u", "/tools/nvsmi_exporter.py"]
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility
+            - name: NVSMI_INTERVAL
+              value: "5"
+          ports:
+            - name: metrics
+              containerPort: 9401
+          readinessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+              readOnly: true
+      volumes:
+        - name: tools
+          configMap:
+            name: lab-tools
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvsmi-exporter
+  namespace: monitoring
+  labels:
+    app: nvsmi-exporter
+spec:
+  selector:
+    app: nvsmi-exporter
+  ports:
+    - name: metrics
+      port: 9401
+      targetPort: metrics

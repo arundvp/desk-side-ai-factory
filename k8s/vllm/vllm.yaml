@@ -1,0 +1,137 @@
+# vLLM OpenAI-compatible server for ${MODEL_ID} on the DGX Sparks.
+# One replica per Spark at most (required anti-affinity); only nodes labelled
+# spark-lab/model-cache=gpt-oss-120b (the download Job finished there) are eligible.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: llm
+  labels:
+    app: vllm
+spec:
+  replicas: ${VLLM_REPLICAS}     # set by 04-vllm.sh: keeps the current count on deploy, changed by scale
+  strategy:
+    type: Recreate            # never two copies of a 63 GB model on one Spark during a rollout
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+        model: gpt-oss-120b
+    spec:
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        spark-lab/model-cache: gpt-oss-120b
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - {key: spark-lab/role, operator: In, values: [inference]}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: vllm
+      containers:
+        - name: vllm
+          image: ${VLLM_IMAGE}
+          command: ["vllm", "serve"]
+          args:
+            - ${MODEL_ID}
+            - --served-model-name=${SERVED_MODEL_NAME}
+            - --host=0.0.0.0
+            - --port=8000
+            # Unified memory: CPU, GPU, OS and every other pod share ~120 GiB. vLLM's default
+            # (~1.0) causes OOM on Spark (NGC vLLM release notes); 0.75 = ~90 GiB for weights
+            # (~61 GiB), activations, CUDA graphs and KV cache.
+            - --gpu-memory-utilization=0.75
+            - --max-model-len=65536
+            # Scheduler cap per engine step. The load tests push concurrency past it on
+            # purpose so you can watch requests queue (vllm:num_requests_waiting).
+            - --max-num-seqs=64
+            - --max-num-batched-tokens=8192
+            - --enable-prefix-caching
+            # MXFP4 MoE + attention kernels reported correct on GB10 (SM121); the CUTLASS FP4
+            # path has corrupted the first Harmony token there (vLLM issue #37030).
+            - --moe-backend=marlin
+            - --attention-backend=TRITON_ATTN
+            # gpt-oss tool calling; the openai_gptoss reasoning parser is applied automatically
+            - --tool-call-parser=openai
+            - --enable-auto-tool-choice
+          env:
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"            # weights come from the download Job; no surprise downloads
+            - name: TIKTOKEN_RS_CACHE_DIR
+              value: /root/.cache/tiktoken   # Harmony vocab, fetched once then kept on the host
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef: {name: vllm-api-key, key: VLLM_API_KEY, optional: true}
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 240     # first start compiles and captures CUDA graphs: allow 40 min
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            # GPU allocations on GB10 come out of system memory, and Spark users report that
+            # container memory limits do not hold them back. The memory *request* reserves that
+            # share with the scheduler so no other pod is placed into it; there is no memory
+            # limit because it would not cap GPU memory and could OOM-kill the host side.
+            requests:
+              cpu: "8"
+              memory: 90Gi
+              nvidia.com/gpu: 1
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - {name: hf, mountPath: /root/.cache/huggingface}
+            - {name: vllm-cache, mountPath: /root/.cache/vllm}
+            - {name: flashinfer-cache, mountPath: /root/.cache/flashinfer}
+            - {name: triton-cache, mountPath: /root/.triton}
+            - {name: tiktoken, mountPath: /root/.cache/tiktoken}
+            - {name: dshm, mountPath: /dev/shm}
+      volumes:
+        - name: hf
+          hostPath: {path: "${LAB_DATA_DIR}/hf", type: DirectoryOrCreate}
+        - name: vllm-cache
+          hostPath: {path: "${LAB_DATA_DIR}/cache/vllm", type: DirectoryOrCreate}
+        - name: flashinfer-cache
+          hostPath: {path: "${LAB_DATA_DIR}/cache/flashinfer", type: DirectoryOrCreate}
+        - name: triton-cache
+          hostPath: {path: "${LAB_DATA_DIR}/cache/triton", type: DirectoryOrCreate}
+        - name: tiktoken
+          hostPath: {path: "${LAB_DATA_DIR}/cache/tiktoken", type: DirectoryOrCreate}
+        - name: dshm
+          emptyDir: {medium: Memory, sizeLimit: 16Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: llm
+  labels:
+    app: vllm
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

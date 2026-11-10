@@ -1,0 +1,3 @@
+source-path=SCRIPTDIR
+disable=SC2015,SC2012
+external-sources=true

@@ -1,0 +1,104 @@
+# Two-node PyTorch all_reduce over the ConnectX-7 rails (NCCL NET/IB, RoCE v2).
+# One pod per Spark, host networking so NCCL sees the rail interfaces and RDMA devices.
+# Rank 0 runs on ${NODE1_NAME}; rendezvous on rail A (${RAIL_A_NODE1_IP}:29500).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: torch-ar-0
+  namespace: lab
+  labels: {app: torch-allreduce, rank: "0"}
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  nodeSelector:
+    spark-lab/node: ${NODE1_NAME}
+  containers:
+    - name: torch
+      image: ${PYTORCH_IMAGE}
+      securityContext:
+        privileged: true        # RDMA verbs on /dev/infiniband and raising RLIMIT_MEMLOCK
+      command:
+        - bash
+        - -c
+        - |
+          ulimit -l unlimited 2>/dev/null || true
+          echo "memlock: $(ulimit -l)"
+          if [ -n "${LAB_NCCL_IB_GID_INDEX}" ]; then export NCCL_IB_GID_INDEX="${LAB_NCCL_IB_GID_INDEX}"; fi
+          ls /dev/infiniband >/dev/null && echo "rdma devices: $(ls /sys/class/infiniband | tr '\n' ' ')"
+          exec torchrun --nnodes=2 --nproc-per-node=1 --node-rank="${RANK_ID}" \
+            --master-addr="${RAIL_A_NODE1_IP}" --master-port=29500 /tools/torch_allreduce.py
+      env:
+        - {name: RANK_ID, value: "0"}
+        - {name: NCCL_IB_HCA, value: "${NCCL_IB_HCA}"}
+        - {name: NCCL_SOCKET_IFNAME, value: "${NCCL_SOCKET_IFNAME}"}
+        - {name: LAB_NCCL_IB_GID_INDEX, value: "${NCCL_IB_GID_INDEX}"}
+        - {name: NCCL_DEBUG, value: INFO}
+        - {name: NCCL_DEBUG_SUBSYS, value: "INIT,NET"}
+        - {name: GLOO_SOCKET_IFNAME, value: "${NCCL_SOCKET_IFNAME}"}
+      resources:
+        requests: {cpu: "2", memory: 16Gi, nvidia.com/gpu: 1}
+        limits: {nvidia.com/gpu: 1}
+      volumeMounts:
+        - {name: tools, mountPath: /tools, readOnly: true}
+        - {name: infiniband, mountPath: /dev/infiniband}
+        - {name: dshm, mountPath: /dev/shm}
+  volumes:
+    - name: tools
+      configMap: {name: lab-tools}
+    - name: infiniband
+      hostPath: {path: /dev/infiniband}
+    - name: dshm
+      emptyDir: {medium: Memory, sizeLimit: 8Gi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: torch-ar-1
+  namespace: lab
+  labels: {app: torch-allreduce, rank: "1"}
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  nodeSelector:
+    spark-lab/node: ${NODE2_NAME}
+  containers:
+    - name: torch
+      image: ${PYTORCH_IMAGE}
+      securityContext:
+        privileged: true
+      command:
+        - bash
+        - -c
+        - |
+          ulimit -l unlimited 2>/dev/null || true
+          echo "memlock: $(ulimit -l)"
+          if [ -n "${LAB_NCCL_IB_GID_INDEX}" ]; then export NCCL_IB_GID_INDEX="${LAB_NCCL_IB_GID_INDEX}"; fi
+          ls /dev/infiniband >/dev/null && echo "rdma devices: $(ls /sys/class/infiniband | tr '\n' ' ')"
+          exec torchrun --nnodes=2 --nproc-per-node=1 --node-rank="${RANK_ID}" \
+            --master-addr="${RAIL_A_NODE1_IP}" --master-port=29500 /tools/torch_allreduce.py
+      env:
+        - {name: RANK_ID, value: "1"}
+        - {name: NCCL_IB_HCA, value: "${NCCL_IB_HCA}"}
+        - {name: NCCL_SOCKET_IFNAME, value: "${NCCL_SOCKET_IFNAME}"}
+        - {name: LAB_NCCL_IB_GID_INDEX, value: "${NCCL_IB_GID_INDEX}"}
+        - {name: NCCL_DEBUG, value: INFO}
+        - {name: NCCL_DEBUG_SUBSYS, value: "INIT,NET"}
+        - {name: GLOO_SOCKET_IFNAME, value: "${NCCL_SOCKET_IFNAME}"}
+      resources:
+        requests: {cpu: "2", memory: 16Gi, nvidia.com/gpu: 1}
+        limits: {nvidia.com/gpu: 1}
+      volumeMounts:
+        - {name: tools, mountPath: /tools, readOnly: true}
+        - {name: infiniband, mountPath: /dev/infiniband}
+        - {name: dshm, mountPath: /dev/shm}
+  volumes:
+    - name: tools
+      configMap: {name: lab-tools}
+    - name: infiniband
+      hostPath: {path: /dev/infiniband}
+    - name: dshm
+      emptyDir: {medium: Memory, sizeLimit: 8Gi}

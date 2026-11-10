@@ -1,0 +1,57 @@
+# Downloads ${MODEL_ID} into ${LAB_DATA_DIR}/hf on ${TARGET_NODE} (host path, kept across pods).
+# Skips the original/ (BF16 reference) and metal/ folders: ~63 GB instead of ~125 GB.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download-${TARGET_NODE}
+  namespace: llm
+  labels:
+    app: model-download
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        spark-lab/node: ${TARGET_NODE}
+      containers:
+        - name: download
+          image: ${VLLM_IMAGE}
+          command:
+            - python3
+            - -c
+            - |
+              import os, pathlib
+              from huggingface_hub import snapshot_download
+              path = snapshot_download(
+                  repo_id=os.environ["MODEL_ID"],
+                  ignore_patterns=["original/*", "metal/*"],
+                  max_workers=8,
+              )
+              size = sum(f.stat().st_size for f in pathlib.Path(path).rglob("*") if f.is_file())
+              shards = len(list(pathlib.Path(path).glob("*.safetensors")))
+              print(f"DOWNLOAD_OK path={path} shards={shards} size_gb={size/1e9:.1f}", flush=True)
+          env:
+            - name: MODEL_ID
+              value: ${MODEL_ID}
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: {name: hf-token, key: HF_TOKEN, optional: true}
+            # - name: HF_HUB_DISABLE_XET     # try "1" if the download stalls
+            #   value: "1"
+          resources:
+            requests: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - name: hf
+              mountPath: /root/.cache/huggingface
+      volumes:
+        - name: hf
+          hostPath:
+            path: ${LAB_DATA_DIR}/hf
+            type: DirectoryOrCreate

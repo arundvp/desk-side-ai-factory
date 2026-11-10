@@ -1,0 +1,104 @@
+# Recording rules: one GPU series per node whichever exporter has data (DCGM first,
+# nvidia-smi exporter as fallback), plus pre-computed vLLM latency quantiles.
+# Alerts: the conditions the load tests are designed to provoke.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: spark-lab
+  namespace: monitoring
+  labels:
+    app: spark-lab
+spec:
+  groups:
+    - name: spark-lab.gpu
+      interval: 5s
+      rules:
+        - record: spark:gpu_utilization:percent
+          expr: max by (node) (DCGM_FI_DEV_GPU_UTIL) or max by (node) (spark_nvsmi_gpu_utilization_percent)
+        - record: spark:gpu_power:watts
+          expr: max by (node) (DCGM_FI_DEV_POWER_USAGE) or max by (node) (spark_nvsmi_power_draw_watts)
+        - record: spark:gpu_temperature:celsius
+          expr: max by (node) (DCGM_FI_DEV_GPU_TEMP) or max by (node) (spark_nvsmi_temperature_gpu_celsius)
+        - record: spark:gpu_sm_clock:mhz
+          expr: max by (node) (DCGM_FI_DEV_SM_CLOCK) or max by (node) (spark_nvsmi_clocks_sm_mhz)
+        - record: spark:gpu_sm_clock_max:mhz
+          expr: max by (node) (spark_nvsmi_clocks_max_sm_mhz)
+        - record: spark:gpu_clock_event_reasons:bitmask
+          expr: max by (node) (spark_nvsmi_clocks_event_reasons_active)
+        - record: spark:node_memory_available:bytes
+          expr: max by (node) (node_memory_MemAvailable_bytes)
+        - record: spark:node_memory_total:bytes
+          expr: max by (node) (node_memory_MemTotal_bytes)
+        - record: spark:node_cpu_busy:ratio
+          expr: 1 - avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[30s]))
+        - record: spark:rdma_rx:bytes_per_second
+          expr: sum by (node, device) (rate(node_infiniband_port_data_received_bytes_total[30s]))
+        - record: spark:rdma_tx:bytes_per_second
+          expr: sum by (node, device) (rate(node_infiniband_port_data_transmitted_bytes_total[30s]))
+
+    - name: spark-lab.vllm
+      interval: 5s
+      rules:
+        - record: spark:vllm_generation_tokens:rate30s
+          expr: sum by (node) (rate(vllm:generation_tokens_total[30s]))
+        - record: spark:vllm_prompt_tokens:rate30s
+          expr: sum by (node) (rate(vllm:prompt_tokens_total[30s]))
+        - record: spark:vllm_requests_finished:rate30s
+          expr: sum by (node, finished_reason) (rate(vllm:request_success_total[30s]))
+        - record: spark:vllm_ttft_seconds:p95_1m
+          expr: histogram_quantile(0.95, sum by (node, le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))
+        - record: spark:vllm_itl_seconds:p95_1m
+          expr: histogram_quantile(0.95, sum by (node, le) (rate(vllm:inter_token_latency_seconds_bucket[1m])))
+        - record: spark:vllm_e2e_seconds:p95_1m
+          expr: histogram_quantile(0.95, sum by (node, le) (rate(vllm:e2e_request_latency_seconds_bucket[1m])))
+        - record: spark:vllm_queue_seconds:p95_1m
+          expr: histogram_quantile(0.95, sum by (node, le) (rate(vllm:request_queue_time_seconds_bucket[1m])))
+
+    - name: spark-lab.alerts
+      rules:
+        - alert: VLLMDown
+          expr: absent(up{job=~".*vllm.*"} == 1)
+          for: 2m
+          labels: {severity: critical}
+          annotations:
+            summary: No vLLM target is up
+        - alert: VLLMQueueBuilding
+          expr: sum by (node) (vllm:num_requests_waiting) > 0
+          for: 1m
+          labels: {severity: warning}
+          annotations:
+            summary: "vLLM on {{ $labels.node }} has had waiting requests for 1m (scheduler full: max-num-seqs or KV cache)"
+        - alert: VLLMKVCacheNearFull
+          expr: max by (node) (vllm:kv_cache_usage_perc) > 0.9
+          for: 1m
+          labels: {severity: warning}
+          annotations:
+            summary: "KV cache on {{ $labels.node }} above 90% for 1m"
+        - alert: VLLMPreempting
+          expr: sum by (node) (increase(vllm:num_preemptions_total[2m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "vLLM on {{ $labels.node }} preempted requests in the last 2m (KV cache exhausted)"
+        - alert: VLLMTTFTHigh
+          expr: spark:vllm_ttft_seconds:p95_1m > 10
+          for: 2m
+          labels: {severity: warning}
+          annotations:
+            summary: "TTFT p95 on {{ $labels.node }} above 10 s for 2m"
+        - alert: GPUHot
+          expr: spark:gpu_temperature:celsius > 85
+          for: 2m
+          labels: {severity: warning}
+          annotations:
+            summary: "GPU on {{ $labels.node }} above 85 C for 2m"
+        - alert: GPUXidError
+          expr: max by (node) (DCGM_FI_DEV_XID_ERRORS) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "XID {{ $value }} reported on {{ $labels.node }}"
+        - alert: UnifiedMemoryLow
+          expr: spark:node_memory_available:bytes < 8 * 1024 * 1024 * 1024
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "{{ $labels.node }} has under 8 GiB of unified memory available"

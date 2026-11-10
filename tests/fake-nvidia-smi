@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# fake-nvidia-smi — answers the queries nvsmi_exporter.py makes, the way nvidia-smi does on
+# GB10: memory.used is N/A (unified memory), an unknown field fails the whole query.
+args="$*"
+q="$(sed -n 's/.*--query-gpu=\([^ ]*\).*/\1/p' <<<"$args")"
+if [[ -n "$q" ]]; then
+  IFS=',' read -ra fields <<<"$q"
+  out=()
+  for f in "${fields[@]}"; do
+    case "$f" in
+      index) out+=("0") ;;
+      uuid) out+=("GPU-11111111-2222-3333-4444-555555555555") ;;
+      name) out+=("NVIDIA GB10") ;;
+      utilization.gpu) out+=("96") ;;
+      utilization.memory) out+=("[N/A]") ;;
+      power.draw) out+=("71.42") ;;
+      power.limit) out+=("[N/A]") ;;
+      temperature.gpu) out+=("68") ;;
+      clocks.sm) out+=("2418") ;;
+      clocks.max.sm) out+=("3003") ;;
+      clocks.mem) out+=("4266") ;;
+      clocks_event_reasons.active) out+=("0x0000000000000004") ;;
+      pstate) out+=("P0") ;;
+      memory.used) out+=("[N/A]") ;;
+      *) echo "Field \"$f\" is not a valid field to query." >&2; exit 2 ;;
+    esac
+  done
+  (IFS=','; echo "${out[*]}" | sed 's/,/, /g')
+  exit 0
+fi
+if [[ "$args" == *--query-compute-apps* ]]; then
+  echo "4242, /usr/bin/python3, 87012"
+  echo "5151, /usr/bin/python3, 8200"
+  exit 0
+fi
+echo "fake-nvidia-smi: unsupported args: $args" >&2
+exit 1

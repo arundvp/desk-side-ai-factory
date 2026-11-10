@@ -1,0 +1,53 @@
+# Staged load generator (tools/loadgen.py) on the load node. Writes stages.json,
+# requests.csv and summary.json to ${LAB_DATA_DIR}/results/${RUN_ID} on that node and
+# serves live client metrics on :9500 (PodMonitor "loadgen").
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadgen-${RUN_ID}
+  namespace: lab
+  labels:
+    app: loadgen
+    run: "${RUN_ID}"
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: loadgen
+        run: "${RUN_ID}"
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        spark-lab/node: ${TARGET_NODE}
+      containers:
+        - name: loadgen
+          image: ${VLLM_IMAGE}        # has Python 3.12 + aiohttp; already cached on the Sparks
+          command: ["python3", "-u", "/tools/loadgen.py"]
+          args:
+            - --base-url=http://vllm.llm.svc.cluster.local:8000
+            - --model=${SERVED_MODEL_NAME}
+            - --profile=${PROFILE}
+            - --out=/results/${RUN_ID}
+          env:
+            - name: LOADGEN_TIME_SCALE
+              value: "${TIME_SCALE}"
+            - name: LOADGEN_NO_KEEPALIVE
+              value: "${LOADGEN_NO_KEEPALIVE}"
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef: {name: vllm-api-key, key: VLLM_API_KEY, optional: true}
+          ports:
+            - name: metrics
+              containerPort: 9500
+          resources:
+            requests: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: tools, mountPath: /tools, readOnly: true}
+            - {name: results, mountPath: /results}
+      volumes:
+        - name: tools
+          configMap: {name: lab-tools}
+        - name: results
+          hostPath: {path: "${LAB_DATA_DIR}/results", type: DirectoryOrCreate}

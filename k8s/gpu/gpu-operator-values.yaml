@@ -1,0 +1,55 @@
+# NVIDIA GPU Operator v26.7.2 values for two DGX Sparks (GB10, DGX OS 7.x).
+# helm upgrade --install gpu-operator nvidia/gpu-operator --version v26.7.2 \
+#   -n gpu-operator -f gpu-operator-values.yaml
+
+# DGX OS ships the driver and the NVIDIA Container Toolkit; the Operator must not install either.
+driver:
+  enabled: false
+toolkit:
+  enabled: false
+
+# GB10 has no MIG.
+migManager:
+  enabled: false
+
+# CDI is the 26.x default. The device plugin writes the CDI spec itself; it needs the host's
+# nvidia-cdi-hook (00-preflight.sh checks). If GPU pods fail with CDI errors, set this to
+# false — every GPU pod in the lab also sets runtimeClassName: nvidia, which works in both modes.
+cdi:
+  enabled: true
+
+devicePlugin:
+  # Time-slicing: each Spark advertises nvidia.com/gpu: 4, so vLLM, a PyTorch job and a smoke
+  # pod can share one GB10. Slices share compute by time and share the 128 GB pool with no
+  # isolation; size every GPU pod's memory request accordingly.
+  config:
+    create: true
+    name: time-slicing-config
+    default: any
+    data:
+      any: |-
+        version: v1
+        flags:
+          migStrategy: none
+        sharing:
+          timeSlicing:
+            renameByDefault: false
+            failRequestsGreaterThanOne: true
+            resources:
+              - name: nvidia.com/gpu
+                replicas: 4
+
+dcgmExporter:
+  enabled: true
+  # DCGM is not supported on GB10 (NVIDIA, DGX Spark forum, March 2026). The exporter runs anyway
+  # so you can see which fields it returns; scripts/dcgm-probe.sh reports them.
+  # If it crash-loops, switch to the basic field list:
+  #   --set dcgmExporter.config.name=dcgm-metrics-basic  (ConfigMap from k8s/gpu/dcgm-metrics-basic.yaml)
+  serviceMonitor:
+    enabled: true
+    interval: 5s
+    scrapeTimeout: 4s
+    relabelings:
+      - sourceLabels: [__meta_kubernetes_pod_node_name]
+        targetLabel: node
+        action: replace

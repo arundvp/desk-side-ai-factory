@@ -1,0 +1,9 @@
+# local settings and secrets: never commit
+lab.env
+.grafana-admin-password
+*.token
+# run output and test scratch
+results/
+tests/out/
+__pycache__/
+*.pyc

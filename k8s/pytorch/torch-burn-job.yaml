@@ -1,0 +1,39 @@
+# PyTorch GPU burn on ${TARGET_NODE}: one time-slice, matmuls at BURN_DUTY for BURN_SECONDS.
+# Used alone (watch GPU telemetry respond) and next to vLLM (noisy-neighbour experiment).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: torch-burn-${TARGET_NODE}
+  namespace: lab
+  labels:
+    app: torch-burn
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: torch-burn
+    spec:
+      restartPolicy: Never
+      runtimeClassName: nvidia
+      nodeSelector:
+        spark-lab/node: ${TARGET_NODE}
+      containers:
+        - name: burn
+          image: ${PYTORCH_IMAGE}
+          command: ["python3", "-u", "/tools/torch_burn.py"]
+          env:
+            - {name: BURN_SECONDS, value: "${BURN_SECONDS}"}
+            - {name: BURN_DUTY, value: "${BURN_DUTY}"}
+            - {name: BURN_ALLOC_GB, value: "${BURN_ALLOC_GB}"}
+            - {name: BURN_N, value: "8192"}
+            - {name: BURN_DTYPE, value: bf16}
+          resources:
+            requests: {cpu: "2", memory: 8Gi, nvidia.com/gpu: 1}
+            limits: {nvidia.com/gpu: 1}
+          volumeMounts:
+            - {name: tools, mountPath: /tools, readOnly: true}
+      volumes:
+        - name: tools
+          configMap: {name: lab-tools}

@@ -1,0 +1,36 @@
+# One-shot GPU smoke test: takes one time-slice on ${TARGET_NODE}, prints nvidia-smi and
+# runs a small PyTorch matmul to prove CUDA works inside a scheduled pod.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cuda-smoke-${TARGET_NODE}
+  namespace: lab
+  labels:
+    app: cuda-smoke
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  nodeSelector:
+    spark-lab/node: ${TARGET_NODE}
+  containers:
+    - name: smoke
+      image: ${PYTORCH_IMAGE}
+      command:
+        - bash
+        - -c
+        - |
+          nvidia-smi -L && nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader
+          python - <<'EOF'
+          import torch, time
+          assert torch.cuda.is_available(), "CUDA not available in pod"
+          d = torch.cuda.get_device_properties(0)
+          print(f"torch {torch.__version__} cuda {torch.version.cuda} device {d.name} sm_{d.major}{d.minor} mem {d.total_memory/2**30:.1f} GiB")
+          a = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
+          torch.cuda.synchronize(); t = time.time()
+          for _ in range(50): a @ a
+          torch.cuda.synchronize(); dt = time.time() - t
+          print(f"SMOKE_OK bf16 matmul {50*2*4096**3/dt/1e12:.1f} TFLOP/s")
+          EOF
+      resources:
+        requests: {cpu: "1", memory: 4Gi, nvidia.com/gpu: 1}
+        limits: {nvidia.com/gpu: 1}

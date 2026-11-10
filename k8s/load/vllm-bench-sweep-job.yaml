@@ -1,0 +1,87 @@
+# Concurrency sweep with `vllm bench serve` (random prompts, fixed input/output length,
+# --ignore-eos so every request generates exactly OUTPUT_LEN tokens). One JSON result per
+# concurrency plus stages.json (start/end per concurrency) for analyze.py.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bench-${RUN_ID}
+  namespace: lab
+  labels:
+    app: vllm-bench
+    run: "${RUN_ID}"
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: vllm-bench
+        run: "${RUN_ID}"
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        spark-lab/node: ${TARGET_NODE}
+      containers:
+        - name: bench
+          image: ${VLLM_IMAGE}
+          env:
+            - {name: CONCURRENCIES, value: "${SWEEP_CONCURRENCY}"}
+            - {name: INPUT_LEN, value: "1024"}
+            - {name: OUTPUT_LEN, value: "512"}
+            - {name: PROMPTS_PER_CONCURRENCY, value: "4"}   # num-prompts = max(8, 4 x concurrency)
+            - {name: HF_HOME, value: /root/.cache/huggingface}  # tokenizer files, cached on the host
+            - {name: OUT, value: "/results/${RUN_ID}"}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: {name: vllm-api-key, key: VLLM_API_KEY, optional: true}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              mkdir -p "$OUT"
+              BASE=http://vllm.llm.svc.cluster.local:8000
+              until curl -sf "$BASE/health" >/dev/null; do echo "waiting for $BASE/health"; sleep 5; done
+              echo '[]' > "$OUT/.stages.tmp"
+              for C in $CONCURRENCIES; do
+                N=$(( C * PROMPTS_PER_CONCURRENCY )); [ "$N" -lt 8 ] && N=8
+                echo "=== concurrency $C, $N prompts, in=$INPUT_LEN out=$OUTPUT_LEN"
+                START=$(date +%s.%N)
+                vllm bench serve \
+                  --backend openai --endpoint /v1/completions \
+                  --base-url "$BASE" \
+                  --model ${SERVED_MODEL_NAME} --tokenizer ${MODEL_ID} \
+                  --dataset-name random \
+                  --random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN" --ignore-eos \
+                  --num-prompts "$N" --max-concurrency "$C" --request-rate inf \
+                  --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,95,99 \
+                  --save-result --result-dir "$OUT" --result-filename "c${C}.json" --label "c${C}"
+                END=$(date +%s.%N)
+                python3 - "$OUT/.stages.tmp" "$C" "$START" "$END" <<'EOF'
+              import json, sys
+              path, c, start, end = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+              stages = json.load(open(path))
+              stages.append({"index": len(stages), "name": f"c{c}", "concurrency": c,
+                             "start": round(start, 3), "end": round(end, 3), "duration_s": round(end - start)})
+              json.dump(stages, open(path, "w"))
+              EOF
+                sleep 15   # gap between steps so each one stands alone in the metrics
+              done
+              python3 - "$OUT" <<'EOF'
+              import json, sys, os
+              out = sys.argv[1]
+              stages = json.load(open(os.path.join(out, ".stages.tmp")))
+              json.dump({"profile": "vllm-bench-sweep", "stages": stages}, open(os.path.join(out, "stages.json"), "w"), indent=2)
+              os.remove(os.path.join(out, ".stages.tmp"))
+              print("BENCH_DONE", out)
+              EOF
+          resources:
+            requests: {cpu: "4", memory: 4Gi}
+          volumeMounts:
+            - {name: results, mountPath: /results}
+            - {name: hf, mountPath: /root/.cache/huggingface}
+      volumes:
+        - name: results
+          hostPath: {path: "${LAB_DATA_DIR}/results", type: DirectoryOrCreate}
+        - name: hf
+          hostPath: {path: "${LAB_DATA_DIR}/hf", type: DirectoryOrCreate}

@@ -1,0 +1,73 @@
+# Scrape configs for the lab's own targets. DCGM Exporter's ServiceMonitor is created by the
+# GPU Operator (k8s/gpu/gpu-operator-values.yaml). Every target gets a "node" label.
+---
+# vLLM OpenAI server: /metrics on the API port, every 5 s for load-test resolution
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: llm
+  labels:
+    app: vllm
+spec:
+  selector:
+    matchLabels:
+      app: vllm
+  namespaceSelector:
+    matchNames: [llm]
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 5s
+      scrapeTimeout: 4s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+          action: replace
+---
+# nvidia-smi exporter (fallback GPU telemetry where DCGM returns nothing on GB10)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvsmi-exporter
+  namespace: monitoring
+  labels:
+    app: nvsmi-exporter
+spec:
+  selector:
+    matchLabels:
+      app: nvsmi-exporter
+  namespaceSelector:
+    matchNames: [monitoring]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 5s
+      scrapeTimeout: 4s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+          action: replace
+---
+# load generator: exposes the active stage and client-side counters while it runs
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: loadgen
+  namespace: lab
+  labels:
+    app: loadgen
+spec:
+  selector:
+    matchLabels:
+      app: loadgen
+  namespaceSelector:
+    matchNames: [lab]
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 5s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+          action: replace

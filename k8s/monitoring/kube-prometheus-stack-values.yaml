@@ -1,0 +1,93 @@
+# kube-prometheus-stack 92.16.0 values for the two-Spark lab.
+# helm upgrade --install kps prometheus-community/kube-prometheus-stack --version 92.16.0 \
+#   -n monitoring -f kube-prometheus-stack-values.yaml
+
+# Short, predictable names: services kps-prometheus, kps-alertmanager, kps-grafana.
+fullnameOverride: kps
+
+# k3s runs the control-plane components inside the k3s binary; their endpoints are not
+# scrapeable the kubeadm way, so these jobs would only produce "target down" alerts.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # Pick up every ServiceMonitor / PodMonitor / PrometheusRule in the cluster,
+    # including the ones the GPU Operator and this lab create (no release label needed).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    retention: 14d
+    retentionSize: 40GB
+    # Keep Prometheus (and its data) on Spark 1 next to the runner.
+    nodeSelector:
+      spark-lab/role: inference
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      spark-lab/role: inference
+
+grafana:
+  # admin password comes from the grafana-admin Secret created by 02-monitoring.sh
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  nodeSelector:
+    spark-lab/role: inference
+  defaultDashboardsTimezone: browser
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  grafana.ini:
+    dashboards:
+      min_refresh_interval: 5s
+
+prometheus-node-exporter:
+  # The chart's two default filesystem excludes are repeated here because setting extraArgs
+  # replaces the list. cpufreq is disabled: on GB10 the CPPC frequency reads can stall a scrape
+  # for more than 5 s, piling up requests until node-exporter answers every scrape with 503.
+  extraArgs:
+    - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+    - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$
+    - --no-collector.cpufreq
+  prometheus:
+    monitor:
+      # add a "node" label (the Kubernetes node name) so node, GPU and vLLM series join on it
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+          action: replace
+
+kube-state-metrics:
+  nodeSelector:
+    spark-lab/role: inference
+
+prometheusOperator:
+  nodeSelector:
+    spark-lab/role: inference
